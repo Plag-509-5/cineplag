@@ -16,3 +16,9 @@ Les comptes, sessions, collections, avis et progressions de lecture sont stocké
 - `MONGODB_DB` : nom de la base (facultatif, valeur par défaut `cineplag`).
 
 Ne mets jamais l’URI avec son mot de passe dans Git. Les index nécessaires sont créés automatiquement à la première connexion. Les routes `/api/auth` et `/api/library` restent les services locaux de l’application ; elles ne constituent pas un fournisseur externe de catalogue ou de lecture.
+
+## Démarrage et mise à jour Pterodactyl
+
+Le script `start.sh` peut remplacer la longue commande de démarrage du panneau. Configure la commande de démarrage sur `bash /home/container/start.sh`, puis définis `MONGODB_URI` dans les variables du serveur. Pour faire un `git pull --ff-only` au prochain démarrage, active `AUTO_UPDATE=1`.
+
+Le serveur doit avoir été déployé comme un véritable checkout Git (le dossier `.git` doit exister), et son remote doit permettre la lecture du dépôt. Le script met à jour la branche actuellement déployée lors d’un redémarrage ; il ne déclenche pas un déploiement instantané à chaque push.
