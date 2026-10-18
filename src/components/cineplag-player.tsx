@@ -24,7 +24,7 @@ export interface PlayerProps {
   captions?: CaptionTrack[];
   languages?: DubLanguage[];
   activeLanguageSubjectId?: string;
-  onLanguageChange?: (subjectId: string, langName: string) => void;
+  onLanguageChange?: (subjectId: string, langName: string, resourceId?: string) => void;
   availableQualities?: string[];
   currentQuality?: string;
   onQualityChange?: (quality: string) => void;
@@ -209,7 +209,10 @@ export default function CineplagPlayer({
 
     let active = true;
     fetch(track.url)
-      .then((res) => res.text())
+      .then((res) => {
+        if (!res.ok) throw new Error("Sous-titres indisponibles.");
+        return res.text();
+      })
       .then((text) => {
         if (!active) return;
         const parsed = parseSrt(text);
@@ -751,7 +754,7 @@ export default function CineplagPlayer({
                             onClick={() => {
                               setLanguagesOpen(false);
                               if (onLanguageChange) {
-                                onLanguageChange(lang.subjectId, lang.name);
+                                onLanguageChange(lang.subjectId, lang.name, lang.resourceId || lang.id || undefined);
                               }
                             }}
                           >

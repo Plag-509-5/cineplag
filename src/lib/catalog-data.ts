@@ -61,6 +61,7 @@ export interface CastMember {
 
 export interface DubLanguage {
   id?: string | null;
+  resourceId?: string | null;
   subjectId: string;
   name: string;
   displayName: string;
