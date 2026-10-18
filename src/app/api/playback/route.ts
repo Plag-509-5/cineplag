@@ -55,6 +55,13 @@ export async function GET(request: Request) {
       );
     }
 
+    if (type !== "webtoon" && duration > 0 && duration < 30) {
+      return Response.json(
+        { error: `Le backend MovieBox a renvoyé un clip de ${Math.round(duration)} s au lieu du film. Sa source doit être corrigée côté API.` },
+        { status: 502 }
+      );
+    }
+
     const cleanServers = [
       {
         server_name: "Lecteur Haute Définition",
