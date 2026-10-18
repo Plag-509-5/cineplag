@@ -184,9 +184,9 @@ export default function CineplagPlayer({
     const handleLoadedMetadata = () => {
       const videoDuration = video.duration || 0;
       setDuration(videoDuration);
-      const isFeatureLengthVideo = unitLabel === "Film" || /(?:^|\b)(?:é|e)pisode\b/i.test(unitLabel);
+      const isFeatureLengthVideo = unitLabel === "Film" || /[ée]pisode\s*\d+/i.test(unitLabel);
       if (isFeatureLengthVideo && Number.isFinite(videoDuration) && videoDuration > 0 && videoDuration < 30) {
-        setPlaybackError(`MovieBox a renvoyé un clip de ${Math.round(videoDuration)} s au lieu du film. La source du flux doit être corrigée côté backend.`);
+        setPlaybackError(`MovieBox a renvoyé un clip de ${Math.round(videoDuration)} s au lieu d’un film ou d’un épisode complet. La source du flux doit être corrigée côté backend.`);
         setIsBuffering(false);
         video.pause();
         return;

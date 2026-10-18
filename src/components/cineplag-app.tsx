@@ -2090,36 +2090,57 @@ export default function CineplagApp() {
 
       {/* Native Custom CinéPlag Media Player with Dubs, Quality, Subtitles, Double-Click Gestures, Rotation & Pop-up */}
       {player && !player.isChapter && (
-        <CineplagPlayer
-          title={player.item.title}
-          unitLabel={player.unitLabel}
-          streamUrl={loadedStreamData?.streamUrl || (servers[activeServer]?.server_link || "")}
-          isHls={loadedStreamData?.isHls || false}
-          captions={availableCaptions}
-          languages={player.item.languages}
-          activeLanguageSubjectId={activeLangSubjectId}
-          onLanguageChange={(subjectId, langName, resourceId) => {
-            setActiveLangSubjectId(subjectId);
-            setActiveLangResourceId(resourceId || "");
-            showToast(`Audio changé : ${langName}`);
-          }}
-          currentQuality={selectedQuality}
-          onQualityChange={(q) => {
-            setSelectedQuality(q);
-            showToast(`Qualité changée : ${q}`);
-          }}
-          detectedBandwidth={detectedBandwidth}
-          onClose={() => {
-            setPlayer(null);
-            setIsMiniPlayer(false);
-          }}
-          onProgressUpdate={(pct) => {
-            setPlayPercent(pct);
-          }}
-          initialPercent={playPercent}
-          onToggleMiniPlayer={() => setIsMiniPlayer((prev) => !prev)}
-          isMiniPlayer={isMiniPlayer}
-        />
+        streamError && !streamLoading ? (
+          <div className="player-overlay">
+            <div className="player-header">
+              <button onClick={() => setPlayer(null)} className="player-back-btn">
+                <ArrowLeft size={20} />
+                <span>Retour</span>
+              </button>
+              <div className="player-title-box">
+                <strong>{player.item.title}</strong>
+                <span>{player.unitLabel}</span>
+              </div>
+              <button className="player-close" onClick={() => setPlayer(null)} aria-label="Fermer le lecteur">
+                <X size={21} />
+              </button>
+            </div>
+            <div className="player-body">
+              <EmptyState icon={WifiOff} title="Lecture indisponible" description={streamError} action="Retour à la fiche" onAction={() => setPlayer(null)} />
+            </div>
+          </div>
+        ) : (
+          <CineplagPlayer
+            title={player.item.title}
+            unitLabel={player.unitLabel}
+            streamUrl={loadedStreamData?.streamUrl || (servers[activeServer]?.server_link || "")}
+            isHls={loadedStreamData?.isHls || false}
+            captions={availableCaptions}
+            languages={player.item.languages}
+            activeLanguageSubjectId={activeLangSubjectId}
+            onLanguageChange={(subjectId, langName, resourceId) => {
+              setActiveLangSubjectId(subjectId);
+              setActiveLangResourceId(resourceId || "");
+              showToast(`Audio changé : ${langName}`);
+            }}
+            currentQuality={selectedQuality}
+            onQualityChange={(q) => {
+              setSelectedQuality(q);
+              showToast(`Qualité changée : ${q}`);
+            }}
+            detectedBandwidth={detectedBandwidth}
+            onClose={() => {
+              setPlayer(null);
+              setIsMiniPlayer(false);
+            }}
+            onProgressUpdate={(pct) => {
+              setPlayPercent(pct);
+            }}
+            initialPercent={playPercent}
+            onToggleMiniPlayer={() => setIsMiniPlayer((prev) => !prev)}
+            isMiniPlayer={isMiniPlayer}
+          />
+        )
       )}
 
       {/* Webtoon Reader for Webtoon Chapter Viewing */}
