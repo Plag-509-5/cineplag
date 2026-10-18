@@ -1,9 +1,8 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { cookies } from "next/headers";
-import { and, eq, gt } from "drizzle-orm";
-import { db } from "@/db";
-import { sessions, users } from "@/db/schema";
+import { getDb } from "@/db";
+import { mongoCollections, type SessionDocument, type UserDocument } from "@/db/models";
 
 const scrypt = promisify(scryptCallback);
 const COOKIE_NAME = "cineplag_session";
@@ -19,6 +18,16 @@ export interface SessionUser {
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function toSessionUser(user: UserDocument): SessionUser {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    avatar: user.avatar ?? null,
+    googleId: user.googleId ?? null,
+  };
 }
 
 export async function hashPassword(password: string) {
@@ -43,25 +52,30 @@ export async function verifyPassword(password: string, stored?: string | null) {
 export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = (await cookies()).get(COOKIE_NAME)?.value;
   if (!token || token.length !== 64) return null;
-  const [user] = await db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      avatar: users.avatar,
-      googleId: users.googleId,
-    })
-    .from(sessions)
-    .innerJoin(users, eq(sessions.userId, users.id))
-    .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date())))
-    .limit(1);
-  return user || null;
+
+  const database = await getDb();
+  const session = await database.collection<SessionDocument>(mongoCollections.sessions).findOne({
+    _id: hashToken(token),
+    expiresAt: { $gt: new Date() },
+  });
+  if (!session) return null;
+
+  const user = await database.collection<UserDocument>(mongoCollections.users).findOne({ _id: session.userId });
+  return user ? toSessionUser(user) : null;
 }
 
 export async function startSession(userId: string) {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  await db.insert(sessions).values({ tokenHash: hashToken(token), userId, expiresAt });
+  const database = await getDb();
+
+  await database.collection<SessionDocument>(mongoCollections.sessions).insertOne({
+    _id: hashToken(token),
+    userId,
+    expiresAt,
+    createdAt: new Date(),
+  });
+
   (await cookies()).set(COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -74,6 +88,12 @@ export async function startSession(userId: string) {
 export async function endSession() {
   const store = await cookies();
   const token = store.get(COOKIE_NAME)?.value;
-  if (token) await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
-  store.delete(COOKIE_NAME);
+  try {
+    if (token) {
+      const database = await getDb();
+      await database.collection<SessionDocument>(mongoCollections.sessions).deleteOne({ _id: hashToken(token) });
+    }
+  } finally {
+    store.delete(COOKIE_NAME);
+  }
 }

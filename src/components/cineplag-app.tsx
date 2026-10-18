@@ -25,7 +25,7 @@ type Review = { id: string; slug: string; type: ContentType; rating: number; bod
 type Library = { collections: Collection[]; progress: Progress[]; reviews: Review[] };
 type Server = { server_name: string; server_link: string; server_type: string; version: string; score?: number };
 type ReaderPage = { page: number; image: string };
-type PlayerState = { item: CatalogDetail; unitId: string; unitLabel: string; isChapter: boolean };
+type PlayerState = { item: CatalogDetail; unitId: string; unitLabel: string; isChapter: boolean; seasonNumber: number; episodeNumber: number };
 type ConfirmState = { title: string; message: string; action: () => void | Promise<void> };
 type QualityOption = "auto" | "4k" | "1080p" | "720p" | "480p" | "360p";
 type SubtitleLang = "off" | "fr" | "fr-cc" | "en" | "es";
@@ -258,6 +258,7 @@ export default function CineplagApp() {
   const [streamError, setStreamError] = useState("");
   const [loadedStreamData, setLoadedStreamData] = useState<{ streamUrl?: string; isHls?: boolean; captions?: any[] } | null>(null);
   const [activeLangSubjectId, setActiveLangSubjectId] = useState<string>("");
+  const [activeLangResourceId, setActiveLangResourceId] = useState<string>("");
   const [servers, setServers] = useState<Server[]>([]);
   const [pages, setPages] = useState<ReaderPage[]>([]);
   const [activeServer, setActiveServer] = useState(0);
@@ -605,7 +606,6 @@ export default function CineplagApp() {
         email: `utilisateur.${randomId}@gmail.com`,
         name: `Membre Google`,
         googleId: `google_sub_${randomId}`,
-        avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
       };
 
       const data = await requestJSON<{ user: User }>("/api/auth", {
@@ -693,19 +693,24 @@ export default function CineplagApp() {
       : detail.type === "movie"
       ? "Film"
       : "Épisode 1";
+    const seasonNumber = Math.max(1, Number.parseInt(episode?.season || "1", 10) || 1);
+    const episodeNumber = Math.max(1, Number.parseInt(episode?.number || "1", 10) || 1);
     const previous = libraryRef.current.progress.find((entry) => entry.slug === detail.slug && entry.type === detail.type);
     setPlayPercent(previous?.episodeId === unitId ? previous.percent : 2);
 
+    const defaultDubLanguage =
+      detail.languages?.find((language) => language.isFrench) ||
+      (detail.frenchSubjectId ? undefined : detail.languages?.find((language) => language.isOriginal));
     const defaultDubSubjectId =
       detail.frenchSubjectId ||
-      detail.languages?.find((l) => l.isFrench)?.subjectId ||
+      defaultDubLanguage?.subjectId ||
       detail.originalSubjectId ||
-      detail.languages?.find((l) => l.isOriginal)?.subjectId ||
       detail.slug;
 
     setActiveLangSubjectId(defaultDubSubjectId);
+    setActiveLangResourceId(defaultDubLanguage?.resourceId || defaultDubLanguage?.id || "");
     setIsMiniPlayer(false);
-    setPlayer({ item: detail, unitId, unitLabel, isChapter });
+    setPlayer({ item: detail, unitId, unitLabel, isChapter, seasonNumber, episodeNumber });
   };
 
   // Playback request & automated stream loading
@@ -722,7 +727,10 @@ export default function CineplagApp() {
 
     const params = new URLSearchParams({ type: player.item.type, slug: player.item.slug });
     params.set(player.isChapter ? "chapter" : "episode", player.unitId);
+    params.set("season", String(player.seasonNumber));
+    params.set("ep", String(player.episodeNumber));
     if (activeLangSubjectId) params.set("subjectId", activeLangSubjectId);
+    if (activeLangResourceId) params.set("resourceId", activeLangResourceId);
     if (selectedQuality && selectedQuality !== "auto") params.set("quality", selectedQuality);
 
     requestJSON<{
@@ -789,7 +797,7 @@ export default function CineplagApp() {
     return () => {
       active = false;
     };
-  }, [player, activeLangSubjectId, selectedQuality, user, applyLibrary]);
+  }, [player, activeLangSubjectId, activeLangResourceId, selectedQuality, user, applyLibrary]);
 
   const updateProgress = async (percent: number) => {
     if (!user || !player) { openAuth(); return; }
@@ -827,69 +835,78 @@ export default function CineplagApp() {
   // Trigger Download using the exact design UX
   const triggerDownloadAction = () => {
     if (!downloadModalItem) return;
-    const isMovie = downloadModalItem.type === "movie";
-    const qObj = ZIP_DESIGN_QUALITIES.find((q) => q.label === selectedDlQuality) || ZIP_DESIGN_QUALITIES[3];
-    const isFullSeries = downloadMode === "full";
-    const epCount = isMovie ? 1 : isFullSeries ? (downloadModalItem.episodes?.length || 8) : selectedEpisodeIds.length;
-    const sizeStr = isMovie ? qObj.size : `${(epCount * qObj.multiplier).toFixed(1)} Go`;
+    if (downloadModalItem.type === "webtoon") {
+      showToast("Le serveur MovieBox ne propose pas le téléchargement des webtoons.", true);
+      return;
+    }
 
-    const newDownload: DownloadItem = {
-      id: `dl-${Date.now()}`,
-      title: downloadModalItem.baseTitle || downloadModalItem.title,
-      subtitle: isMovie
-        ? `${selectedDlQuality} • ${downloadModalItem.version || "VF"}`
-        : isFullSeries
-        ? `Intégrale (${downloadModalItem.seasons?.length || 1} saisons • ${epCount} épisodes • ${selectedDlQuality})`
-        : `${epCount} épisode${epCount > 1 ? "s" : ""} • ${selectedDlQuality}`,
-      type: downloadModalItem.type,
-      slug: downloadModalItem.slug,
-      image: downloadModalItem.image,
-      quality: selectedDlQuality,
-      version: downloadModalItem.version || "VF",
-      size: sizeStr,
-      progress: 0,
-      status: "downloading",
-      downloadedAt: new Date().toLocaleDateString("fr-FR"),
-      episodesCount: epCount,
+    const isMovie = downloadModalItem.type === "movie";
+    const isFullSeries = downloadMode === "full";
+    const selectedEpisodes = isMovie
+      ? []
+      : (downloadModalItem.episodes || []).filter((episode) =>
+          isFullSeries || selectedEpisodeIds.includes(episode.episode_id)
+        );
+
+    if (!isMovie && selectedEpisodes.length === 0) {
+      showToast("Aucun épisode disponible à télécharger.", true);
+      return;
+    }
+
+    const createDownloadUrl = (episode?: Episode) => {
+      const params = new URLSearchParams({
+        subjectId: downloadModalItem.slug,
+        quality: selectedDlQuality,
+        title: downloadModalItem.baseTitle || downloadModalItem.title,
+        season: episode?.season || downloadSeason || "1",
+        episode: episode?.number || "1",
+      });
+      return `/api/download?${params.toString()}`;
     };
 
-    const next = [newDownload, ...downloadsList.filter((d) => d.slug !== downloadModalItem.slug)];
-    persistDownloads(next);
+    const downloadOne = (url: string, filename: string) => {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.rel = "noopener noreferrer";
+      anchor.target = "_blank";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    };
 
-    try {
-      const linkContent =
-        `# CinéPlag Download Package\n# Titre: ${downloadModalItem.title}\n# Qualité: ${selectedDlQuality}\n# Audio: ${downloadModalItem.version || "VF"}\n# Date: ${new Date().toISOString()}\n\n` +
-        (isMovie
-          ? `https://cineplag.stream/${downloadModalItem.slug}-${selectedDlQuality}.mp4`
-          : (downloadModalItem.episodes || [])
-              .filter((e) => isFullSeries || selectedEpisodeIds.includes(e.episode_id))
-              .map((e, idx) => `https://cineplag.stream/${downloadModalItem.slug}/s01e${String(idx + 1).padStart(2, "0")}-${selectedDlQuality}.mp4`)
-              .join("\n"));
-      const blob = new Blob([linkContent], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${downloadModalItem.slug}-${isFullSeries ? "integrale" : "selection"}-${selectedDlQuality}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {}
+    if (isMovie || selectedEpisodes.length === 1) {
+      const episode = selectedEpisodes[0];
+      const suffix = episode ? `-s${episode.season || "1"}e${episode.number}` : "";
+      downloadOne(
+        createDownloadUrl(episode),
+        `${downloadModalItem.slug}${suffix}-${selectedDlQuality}.mp4`
+      );
+      setDownloadModalItem(null);
+      showToast(`Téléchargement demandé à MovieBox (${selectedDlQuality}).`);
+      return;
+    }
+
+    // The API exposes one download per episode, not a season archive; provide API-backed links.
+    const linkContent = [
+      `# CinéPlag — ${downloadModalItem.baseTitle || downloadModalItem.title}`,
+      `# Qualité : ${selectedDlQuality}`,
+      "# Chaque lien déclenche le téléchargement d’un épisode via le serveur MovieBox.",
+      "",
+      ...selectedEpisodes.map((episode) => `${window.location.origin}${createDownloadUrl(episode)}`),
+    ].join("\n");
+    const blob = new Blob([linkContent], { type: "text/plain;charset=utf-8" });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `${downloadModalItem.slug}-${isFullSeries ? "integrale" : "selection"}-${selectedDlQuality}-liens.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 
     setDownloadModalItem(null);
-    showToast(
-      isMovie
-        ? `Téléchargement lancé (${downloadModalItem.title} en ${selectedDlQuality} • ${sizeStr}).`
-        : isFullSeries
-        ? `Téléchargement de l'intégrale lancé (${epCount} épisodes • ${sizeStr}).`
-        : `${epCount} épisode(s) en cours de téléchargement (${sizeStr}).`
-    );
-
-    setTimeout(() => {
-      persistDownloads(
-        next.map((item) => (item.id === newDownload.id ? { ...item, progress: 100, status: "completed" } : item))
-      );
-    }, 4500);
+    showToast(`${selectedEpisodes.length} liens de téléchargement MovieBox générés.`);
   };
 
   const removeDownload = (id: string) => {
@@ -2073,35 +2090,57 @@ export default function CineplagApp() {
 
       {/* Native Custom CinéPlag Media Player with Dubs, Quality, Subtitles, Double-Click Gestures, Rotation & Pop-up */}
       {player && !player.isChapter && (
-        <CineplagPlayer
-          title={player.item.title}
-          unitLabel={player.unitLabel}
-          streamUrl={loadedStreamData?.streamUrl || (servers[activeServer]?.server_link || "")}
-          isHls={loadedStreamData?.isHls || false}
-          captions={availableCaptions}
-          languages={player.item.languages}
-          activeLanguageSubjectId={activeLangSubjectId}
-          onLanguageChange={(subjectId, langName) => {
-            setActiveLangSubjectId(subjectId);
-            showToast(`Audio changé : ${langName}`);
-          }}
-          currentQuality={selectedQuality}
-          onQualityChange={(q) => {
-            setSelectedQuality(q);
-            showToast(`Qualité changée : ${q}`);
-          }}
-          detectedBandwidth={detectedBandwidth}
-          onClose={() => {
-            setPlayer(null);
-            setIsMiniPlayer(false);
-          }}
-          onProgressUpdate={(pct) => {
-            setPlayPercent(pct);
-          }}
-          initialPercent={playPercent}
-          onToggleMiniPlayer={() => setIsMiniPlayer((prev) => !prev)}
-          isMiniPlayer={isMiniPlayer}
-        />
+        streamError && !streamLoading ? (
+          <div className="player-overlay">
+            <div className="player-header">
+              <button onClick={() => setPlayer(null)} className="player-back-btn">
+                <ArrowLeft size={20} />
+                <span>Retour</span>
+              </button>
+              <div className="player-title-box">
+                <strong>{player.item.title}</strong>
+                <span>{player.unitLabel}</span>
+              </div>
+              <button className="player-close" onClick={() => setPlayer(null)} aria-label="Fermer le lecteur">
+                <X size={21} />
+              </button>
+            </div>
+            <div className="player-body">
+              <EmptyState icon={WifiOff} title="Lecture indisponible" description={streamError} action="Retour à la fiche" onAction={() => setPlayer(null)} />
+            </div>
+          </div>
+        ) : (
+          <CineplagPlayer
+            title={player.item.title}
+            unitLabel={player.unitLabel}
+            streamUrl={loadedStreamData?.streamUrl || (servers[activeServer]?.server_link || "")}
+            isHls={loadedStreamData?.isHls || false}
+            captions={availableCaptions}
+            languages={player.item.languages}
+            activeLanguageSubjectId={activeLangSubjectId}
+            onLanguageChange={(subjectId, langName, resourceId) => {
+              setActiveLangSubjectId(subjectId);
+              setActiveLangResourceId(resourceId || "");
+              showToast(`Audio changé : ${langName}`);
+            }}
+            currentQuality={selectedQuality}
+            onQualityChange={(q) => {
+              setSelectedQuality(q);
+              showToast(`Qualité changée : ${q}`);
+            }}
+            detectedBandwidth={detectedBandwidth}
+            onClose={() => {
+              setPlayer(null);
+              setIsMiniPlayer(false);
+            }}
+            onProgressUpdate={(pct) => {
+              setPlayPercent(pct);
+            }}
+            initialPercent={playPercent}
+            onToggleMiniPlayer={() => setIsMiniPlayer((prev) => !prev)}
+            isMiniPlayer={isMiniPlayer}
+          />
+        )
       )}
 
       {/* Webtoon Reader for Webtoon Chapter Viewing */}

@@ -634,6 +634,48 @@
   background: rgba(0, 0, 0, 0.3);
 }
 
+.player-source-error {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 14, 0.94);
+  text-align: center;
+}
+
+.player-source-error-card {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  width: min(100%, 520px);
+  padding: 32px;
+  border: 1px solid rgba(243, 39, 77, 0.35);
+  border-radius: 18px;
+  background: #0c1320;
+  color: #f5f7fb;
+}
+
+.player-source-error-card > svg {
+  color: #f3274d;
+}
+
+.player-source-error-card h2,
+.player-source-error-card p {
+  margin: 0;
+}
+
+.player-source-error-card p {
+  color: #aeb8c8;
+  line-height: 1.6;
+}
+
+.player-source-error-card button {
+  margin-top: 6px;
+  cursor: pointer;
+}
+
 .center-play-button {
   position: absolute;
   width: 72px;

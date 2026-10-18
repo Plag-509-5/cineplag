@@ -13,6 +13,7 @@ export async function GET(request: Request) {
     const queryEpisode = params.get("ep") || "";
     const quality = params.get("quality") || "720p";
     const langSubjectId = params.get("langSubjectId") || params.get("subjectId") || "";
+    const resourceId = params.get("resourceId") || params.get("resource_id") || "";
 
     if (!validType(type) || !slug || slug.length > 255) {
       return Response.json({ error: "Paramètres de lecture invalides." }, { status: 400 });
@@ -45,12 +46,19 @@ export async function GET(request: Request) {
     }
 
     const { streamUrl, duration, qualityList, isHls, captions, season, episode: parsedEp, subjectId } =
-      await getStreamAndCaptions(slug, se, ep, quality, langSubjectId || undefined);
+      await getStreamAndCaptions(slug, se, ep, quality, langSubjectId || undefined, resourceId || undefined);
 
     if (!streamUrl) {
       return Response.json(
         { error: "Flux de lecture momentanément indisponible. Réessayez dans un instant." },
         { status: 503 }
+      );
+    }
+
+    if (type !== "webtoon" && duration > 0 && duration < 30) {
+      return Response.json(
+        { error: `Le backend MovieBox a renvoyé un clip de ${Math.round(duration)} s au lieu d’un film ou d’un épisode complet. Sa source doit être corrigée côté API.` },
+        { status: 502 }
       );
     }
 

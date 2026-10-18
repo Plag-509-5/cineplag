@@ -61,6 +61,7 @@ export interface CastMember {
 
 export interface DubLanguage {
   id?: string | null;
+  resourceId?: string | null;
   subjectId: string;
   name: string;
   displayName: string;
@@ -165,17 +166,31 @@ export function formatDubDisplayName(name: string): string {
 
 export function computeAccurateVersionLabel(sub: any, languages?: DubLanguage[]): string {
   const langs: any[] = languages || (Array.isArray(sub.languages) ? sub.languages : []);
-  const subs = typeof sub.subtitles === "string" ? sub.subtitles.toLowerCase() : "";
-  const rawTitle = (sub.title || "").toLowerCase();
-
-  const hasFrenchDub = langs.some(
-    (l: any) => /french|français|version française/i.test(l.name || l.displayName || "")
-  );
-  const hasFrenchSub = subs.includes("français") || subs.includes("french");
+  const rawTitle = String(sub.title || "").toLowerCase();
+  const subtitleValue = sub.subtitles ?? sub.subtitleLanguages ?? sub.subtitle_languages ?? sub.subtitleList ?? sub.subtitle_list ?? sub.captions ?? "";
+  const subtitleText = Array.isArray(subtitleValue)
+    ? subtitleValue.map((entry: any) => typeof entry === "string" ? entry : entry?.name || entry?.language || entry?.lang || entry?.code || "").join(" ").toLowerCase()
+    : subtitleValue && typeof subtitleValue === "object"
+      ? Object.entries(subtitleValue).map(([key, value]) => `${key} ${String(value)}`).join(" ").toLowerCase()
+      : String(subtitleValue).toLowerCase();
+  const languageText = (language: any) => String(
+    language?.name || language?.displayName || language?.language || language?.lang || language?.code || language || ""
+  ).toLowerCase();
+  const originalLanguage = languageText(sub.originalLanguage || sub.original_language || sub.language || sub.languageCode || sub.language_code || "");
+  const isFrenchOriginal = /^(?:fr|fra|french|français|francais)(?:$|\b|[-_])/i.test(originalLanguage);
+  const isSubtitleLanguage = (language: any) => /^(?:sub|subtitle|subtitles|caption|captions|cc)$/i.test(String(language?.type || ""));
+  const hasFrenchDub = langs.some((language: any) =>
+    /french|français|francais|version française|version francaise|^fra?(?:$|[-_])/i.test(languageText(language)) && !isSubtitleLanguage(language)
+  ) || /(?:^|[^a-z])(?:vf|version française|version francaise|french dub)(?:$|[^a-z])/.test(rawTitle);
+  const hasFrenchSub = /français|francais|french|vostfr|(?:^|[^a-z])fra?(?:$|[^a-z])/.test(subtitleText) || /vostfr/i.test(rawTitle) ||
+    langs.some((language: any) =>
+      isSubtitleLanguage(language) && /french|français|francais|^fra?(?:$|[-_])/i.test(languageText(language))
+    );
 
   if (hasFrenchDub && hasFrenchSub) return "VF / VOSTFR";
   if (hasFrenchDub) return "VF";
   if (hasFrenchSub) return "VOSTFR";
+  if (isFrenchOriginal) return "VO (FR)";
   if (langs.length > 2) return "Multi-Audio";
   if (rawTitle.includes("hindi")) return "VO (Hindi)";
   if (rawTitle.includes("english")) return "VO (EN)";

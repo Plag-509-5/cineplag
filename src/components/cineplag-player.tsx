@@ -24,7 +24,7 @@ export interface PlayerProps {
   captions?: CaptionTrack[];
   languages?: DubLanguage[];
   activeLanguageSubjectId?: string;
-  onLanguageChange?: (subjectId: string, langName: string) => void;
+  onLanguageChange?: (subjectId: string, langName: string, resourceId?: string) => void;
   availableQualities?: string[];
   currentQuality?: string;
   onQualityChange?: (quality: string) => void;
@@ -92,6 +92,7 @@ export default function CineplagPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [isBuffering, setIsBuffering] = useState(true);
+  const [playbackError, setPlaybackError] = useState("");
 
   // Double click ripple feedback on screen
   const [doubleClickEffect, setDoubleClickEffect] = useState<"left" | "right" | null>(null);
@@ -126,6 +127,7 @@ export default function CineplagPlayer({
     let hlsPlayer: any = null;
 
     setIsBuffering(true);
+    setPlaybackError("");
 
     const isDash = streamUrl.includes(".mpd") || streamUrl.includes("/dash/");
     const isM3u8 = streamUrl.includes(".m3u8") || isHls;
@@ -180,9 +182,17 @@ export default function CineplagPlayer({
     if (!video) return;
 
     const handleLoadedMetadata = () => {
-      setDuration(video.duration || 0);
-      if (initialPercent > 0 && initialPercent < 100 && video.duration) {
-        const resumeSec = (initialPercent / 100) * video.duration;
+      const videoDuration = video.duration || 0;
+      setDuration(videoDuration);
+      const isFeatureLengthVideo = unitLabel === "Film" || /[ée]pisode\s*\d+/i.test(unitLabel);
+      if (isFeatureLengthVideo && Number.isFinite(videoDuration) && videoDuration > 0 && videoDuration < 30) {
+        setPlaybackError(`MovieBox a renvoyé un clip de ${Math.round(videoDuration)} s au lieu d’un film ou d’un épisode complet. La source du flux doit être corrigée côté backend.`);
+        setIsBuffering(false);
+        video.pause();
+        return;
+      }
+      if (initialPercent > 0 && initialPercent < 100 && videoDuration) {
+        const resumeSec = (initialPercent / 100) * videoDuration;
         video.currentTime = resumeSec;
       }
       setIsBuffering(false);
@@ -191,7 +201,7 @@ export default function CineplagPlayer({
 
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
     return () => video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-  }, [initialPercent]);
+  }, [initialPercent, unitLabel]);
 
   // Fetch and parse active subtitle track
   useEffect(() => {
@@ -209,7 +219,10 @@ export default function CineplagPlayer({
 
     let active = true;
     fetch(track.url)
-      .then((res) => res.text())
+      .then((res) => {
+        if (!res.ok) throw new Error("Sous-titres indisponibles.");
+        return res.text();
+      })
       .then((text) => {
         if (!active) return;
         const parsed = parseSrt(text);
@@ -556,6 +569,17 @@ export default function CineplagPlayer({
           onTimeUpdate={handleTimeUpdate}
         />
 
+        {playbackError && (
+          <div className="player-source-error" role="alert" onClick={(event) => event.stopPropagation()}>
+            <div className="player-source-error-card">
+              <Wifi size={32} aria-hidden="true" />
+              <h2>Flux MovieBox incomplet</h2>
+              <p>{playbackError} Vérifiez le résolveur vidéo côté API MovieBox.</p>
+              <button type="button" className="button button-outline" onClick={onClose}>Retour à la fiche</button>
+            </div>
+          </div>
+        )}
+
         {/* Double-Click Left Feedback (-10s) */}
         {doubleClickEffect === "left" && (
           <div className="seek-ripple-overlay left">
@@ -751,7 +775,7 @@ export default function CineplagPlayer({
                             onClick={() => {
                               setLanguagesOpen(false);
                               if (onLanguageChange) {
-                                onLanguageChange(lang.subjectId, lang.name);
+                                onLanguageChange(lang.subjectId, lang.name, lang.resourceId || lang.id || undefined);
                               }
                             }}
                           >
