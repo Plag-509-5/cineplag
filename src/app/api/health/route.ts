@@ -1,13 +1,13 @@
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
+import { getDb } from "@/db";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    await db.execute(sql`select 1`);
-    return Response.json({ ok: true });
+    const database = await getDb();
+    await database.command({ ping: 1 });
+    return Response.json({ ok: true, database: "mongodb" });
   } catch {
-    return Response.json({ ok: false }, { status: 500 });
+    return Response.json({ ok: false, database: "mongodb" }, { status: 503 });
   }
 }

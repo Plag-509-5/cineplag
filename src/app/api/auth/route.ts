@@ -1,12 +1,47 @@
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { collections, users } from "@/db/schema";
+import { randomUUID } from "node:crypto";
+import { getDb } from "@/db";
+import {
+  mongoCollections,
+  type CollectionDocument,
+  type SessionDocument,
+  type UserDocument,
+  type CollectionItemDocument,
+  type WatchProgressDocument,
+  type ReviewDocument,
+} from "@/db/models";
 import { endSession, getCurrentUser, hashPassword, startSession, verifyPassword } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 function fail(message: string, status = 400) {
   return Response.json({ error: message }, { status });
+}
+
+function publicUser(user: UserDocument) {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    avatar: user.avatar ?? null,
+  };
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && Number(error.code) === 11000);
+}
+
+async function createDefaultCollection(userId: string) {
+  const database = await getDb();
+  const collection: CollectionDocument = {
+    _id: randomUUID(),
+    userId,
+    name: "Ma liste",
+    description: "",
+    color: "coral",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  await database.collection<CollectionDocument>(mongoCollections.collections).insertOne(collection);
 }
 
 export async function GET() {
@@ -36,44 +71,34 @@ export async function POST(request: Request) {
         return fail("Compte Google invalide.");
       }
 
-      const [existing] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+      const database = await getDb();
+      const users = database.collection<UserDocument>(mongoCollections.users);
+      let userToLog = await users.findOne({ email });
 
-      let userToLog = existing;
-      if (!existing) {
-        userToLog = await db.transaction(async (tx) => {
-          const [created] = await tx
-            .insert(users)
-            .values({
-              name,
-              email,
-              googleId,
-              avatar,
-            })
-            .returning();
-          await tx.insert(collections).values({ userId: created.id, name: "Ma liste", description: "", color: "coral" });
-          return created;
-        });
-      } else if (!existing.googleId || (avatar && !existing.avatar)) {
-        const [updated] = await db
-          .update(users)
-          .set({
-            googleId: existing.googleId || googleId,
-            avatar: existing.avatar || avatar,
-          })
-          .where(eq(users.id, existing.id))
-          .returning();
-        userToLog = updated;
+      if (!userToLog) {
+        const created: UserDocument = {
+          _id: randomUUID(),
+          name,
+          email,
+          googleId,
+          avatar,
+          createdAt: new Date(),
+        };
+        await users.insertOne(created);
+        await createDefaultCollection(created._id);
+        userToLog = created;
+      } else {
+        const updates: { googleId?: string; avatar?: string } = {};
+        if (!userToLog.googleId) updates.googleId = googleId;
+        if (avatar && !userToLog.avatar) updates.avatar = avatar;
+        if (Object.keys(updates).length > 0) {
+          await users.updateOne({ _id: userToLog._id }, { $set: updates });
+          userToLog = { ...userToLog, ...updates };
+        }
       }
 
-      await startSession(userToLog.id);
-      return Response.json({
-        user: {
-          id: userToLog.id,
-          name: userToLog.name,
-          email: userToLog.email,
-          avatar: userToLog.avatar,
-        },
-      });
+      await startSession(userToLog._id);
+      return Response.json({ user: publicUser(userToLog) });
     }
 
     if (body.action === "register") {
@@ -85,48 +110,42 @@ export async function POST(request: Request) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail("Saisissez une adresse e-mail valide.");
       if (password.length < 8 || password.length > 200) return fail("Le mot de passe doit contenir au moins 8 caractères.");
 
-      const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
-      if (existing.length) return fail("Cette adresse e-mail est déjà utilisée.", 409);
+      const database = await getDb();
+      const users = database.collection<UserDocument>(mongoCollections.users);
+      if (await users.findOne({ email }, { projection: { _id: 1 } })) {
+        return fail("Cette adresse e-mail est déjà utilisée.", 409);
+      }
 
-      const passwordHash = await hashPassword(password);
-      const user = await db.transaction(async (tx) => {
-        const [created] = await tx
-          .insert(users)
-          .values({ name, email, passwordHash })
-          .returning({ id: users.id, name: users.name, email: users.email, avatar: users.avatar });
-        await tx.insert(collections).values({ userId: created.id, name: "Ma liste", description: "", color: "coral" });
-        return created;
-      });
-
-      await startSession(user.id);
-      return Response.json({ user }, { status: 201 });
+      const user: UserDocument = {
+        _id: randomUUID(),
+        name,
+        email,
+        passwordHash: await hashPassword(password),
+        createdAt: new Date(),
+      };
+      await users.insertOne(user);
+      await createDefaultCollection(user._id);
+      await startSession(user._id);
+      return Response.json({ user: publicUser(user) }, { status: 201 });
     }
 
     if (body.action === "login") {
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
-      const [account] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+      const database = await getDb();
+      const account = await database.collection<UserDocument>(mongoCollections.users).findOne({ email });
 
       if (!account || !(await verifyPassword(password, account.passwordHash))) {
         return fail("E-mail ou mot de passe incorrect.", 401);
       }
 
-      await startSession(account.id);
-      return Response.json({
-        user: {
-          id: account.id,
-          name: account.name,
-          email: account.email,
-          avatar: account.avatar,
-        },
-      });
+      await startSession(account._id);
+      return Response.json({ user: publicUser(account) });
     }
 
     return fail("Action inconnue.");
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-      return fail("Cette adresse e-mail est déjà utilisée.", 409);
-    }
+    if (isDuplicateKeyError(error)) return fail("Cette adresse e-mail est déjà utilisée.", 409);
     return fail("Une erreur est survenue. Réessayez dans un instant.", 500);
   }
 }
@@ -138,23 +157,27 @@ export async function PATCH(request: Request) {
     const body = await request.json();
     const name = String(body.name || "").trim().slice(0, 120);
     if (name.length < 2) return fail("Votre nom doit contenir au moins 2 caractères.");
+
+    const database = await getDb();
+    const users = database.collection<UserDocument>(mongoCollections.users);
     const changes: { name: string; passwordHash?: string } = { name };
 
     if (body.newPassword) {
-      if (String(body.newPassword).length < 8) return fail("Le nouveau mot de passe doit contenir au moins 8 caractères.");
-      const [account] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, user.id)).limit(1);
+      const newPassword = String(body.newPassword);
+      if (newPassword.length < 8 || newPassword.length > 200) {
+        return fail("Le nouveau mot de passe doit contenir entre 8 et 200 caractères.");
+      }
+      const account = await users.findOne({ _id: user.id }, { projection: { passwordHash: 1 } });
       if (account?.passwordHash && !(await verifyPassword(String(body.currentPassword || ""), account.passwordHash))) {
         return fail("Mot de passe actuel incorrect.", 401);
       }
-      changes.passwordHash = await hashPassword(String(body.newPassword));
+      changes.passwordHash = await hashPassword(newPassword);
     }
 
-    const [updated] = await db
-      .update(users)
-      .set(changes)
-      .where(eq(users.id, user.id))
-      .returning({ id: users.id, name: users.name, email: users.email, avatar: users.avatar });
-    return Response.json({ user: updated });
+    await users.updateOne({ _id: user.id }, { $set: changes });
+    const updated = await users.findOne({ _id: user.id });
+    if (!updated) return fail("Compte introuvable.", 404);
+    return Response.json({ user: publicUser(updated) });
   } catch {
     return fail("Impossible de mettre à jour votre profil.", 500);
   }
@@ -164,8 +187,23 @@ export async function DELETE() {
   try {
     const user = await getCurrentUser();
     if (!user) return fail("Session requise.", 401);
+
     await endSession();
-    await db.delete(users).where(eq(users.id, user.id));
+    const database = await getDb();
+    const ownedCollections = await database.collection<CollectionDocument>(mongoCollections.collections)
+      .find({ userId: user.id }, { projection: { _id: 1 } })
+      .toArray();
+    const collectionIds = ownedCollections.map((collection) => collection._id);
+
+    await Promise.all([
+      database.collection<SessionDocument>(mongoCollections.sessions).deleteMany({ userId: user.id }),
+      database.collection<CollectionItemDocument>(mongoCollections.collectionItems).deleteMany({ collectionId: { $in: collectionIds } }),
+      database.collection<CollectionDocument>(mongoCollections.collections).deleteMany({ userId: user.id }),
+      database.collection<WatchProgressDocument>(mongoCollections.watchProgress).deleteMany({ userId: user.id }),
+      database.collection<ReviewDocument>(mongoCollections.reviews).deleteMany({ userId: user.id }),
+      database.collection<UserDocument>(mongoCollections.users).deleteOne({ _id: user.id }),
+    ]);
+
     return Response.json({ user: null });
   } catch {
     return fail("Impossible de supprimer le compte.", 500);

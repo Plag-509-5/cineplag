@@ -1,19 +1,46 @@
-import { desc, inArray, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { collectionItems, collections, reviews, watchProgress } from "@/db/schema";
+import { getDb } from "@/db";
+import {
+  mongoCollections,
+  withPublicId,
+  type CollectionDocument,
+  type CollectionItemDocument,
+  type ReviewDocument,
+  type WatchProgressDocument,
+} from "@/db/models";
 
 export async function getLibrarySnapshot(userId: string) {
-  const [userCollections, progress, userReviews] = await Promise.all([
-    db.select().from(collections).where(eq(collections.userId, userId)).orderBy(desc(collections.createdAt)),
-    db.select().from(watchProgress).where(eq(watchProgress.userId, userId)).orderBy(desc(watchProgress.updatedAt)),
-    db.select().from(reviews).where(eq(reviews.userId, userId)).orderBy(desc(reviews.updatedAt)),
+  const database = await getDb();
+  const [collectionDocuments, progressDocuments, reviewDocuments] = await Promise.all([
+    database.collection<CollectionDocument>(mongoCollections.collections)
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .toArray(),
+    database.collection<WatchProgressDocument>(mongoCollections.watchProgress)
+      .find({ userId })
+      .sort({ updatedAt: -1 })
+      .toArray(),
+    database.collection<ReviewDocument>(mongoCollections.reviews)
+      .find({ userId })
+      .sort({ updatedAt: -1 })
+      .toArray(),
   ]);
-  const items = userCollections.length
-    ? await db.select().from(collectionItems).where(inArray(collectionItems.collectionId, userCollections.map((collection) => collection.id))).orderBy(desc(collectionItems.addedAt))
+
+  const collectionIds = collectionDocuments.map((collection) => collection._id);
+  const itemDocuments = collectionIds.length
+    ? await database.collection<CollectionItemDocument>(mongoCollections.collectionItems)
+        .find({ collectionId: { $in: collectionIds } })
+        .sort({ addedAt: -1 })
+        .toArray()
     : [];
+
   return {
-    collections: userCollections.map((collection) => ({ ...collection, items: items.filter((item) => item.collectionId === collection.id) })),
-    progress,
-    reviews: userReviews,
+    collections: collectionDocuments.map((collection) => ({
+      ...withPublicId(collection),
+      items: itemDocuments
+        .filter((item) => item.collectionId === collection._id)
+        .map(withPublicId),
+    })),
+    progress: progressDocuments.map(withPublicId),
+    reviews: reviewDocuments.map(withPublicId),
   };
 }

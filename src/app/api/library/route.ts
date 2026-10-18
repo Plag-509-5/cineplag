@@ -1,6 +1,13 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { collectionItems, collections, reviews, watchProgress } from "@/db/schema";
+import { randomUUID } from "node:crypto";
+import type { Db } from "mongodb";
+import { getDb } from "@/db";
+import {
+  mongoCollections,
+  type CollectionDocument,
+  type CollectionItemDocument,
+  type ReviewDocument,
+  type WatchProgressDocument,
+} from "@/db/models";
 import { getCurrentUser } from "@/lib/auth";
 import { validType } from "@/lib/catalog";
 import { getLibrarySnapshot } from "@/lib/library";
@@ -14,6 +21,10 @@ const fail = (message: string, status = 400) => Response.json({ error: message }
 const score = (value: unknown) => Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
 const rating = (value: unknown) => Math.round(Number(value) || 0);
 
+function isDuplicateKeyError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && Number(error.code) === 11000);
+}
+
 function readItem(raw: unknown) {
   if (!raw || typeof raw !== "object") return null;
   const item = raw as Input;
@@ -22,16 +33,17 @@ function readItem(raw: unknown) {
   return { slug, title, type, image: /^https?:\/\//i.test(image) ? image : "", year: text(item.year, 12) };
 }
 
-async function ownCollection(id: string, userId: string) {
-  const [found] = await db.select({ id: collections.id }).from(collections).where(and(eq(collections.id, id), eq(collections.userId, userId))).limit(1);
+async function ownCollection(database: Db, id: string, userId: string) {
+  const found = await database.collection<CollectionDocument>(mongoCollections.collections)
+    .findOne({ _id: id, userId }, { projection: { _id: 1 } });
   return !!found;
 }
 
-async function ownItem(id: string, userId: string) {
-  const [found] = await db.select({ id: collectionItems.id }).from(collectionItems)
-    .innerJoin(collections, eq(collectionItems.collectionId, collections.id))
-    .where(and(eq(collectionItems.id, id), eq(collections.userId, userId))).limit(1);
-  return !!found;
+async function ownItem(database: Db, id: string, userId: string) {
+  const item = await database.collection<CollectionItemDocument>(mongoCollections.collectionItems)
+    .findOne({ _id: id }, { projection: { collectionId: 1 } });
+  if (!item) return false;
+  return ownCollection(database, item.collectionId, userId);
 }
 
 async function success(userId: string) {
@@ -43,7 +55,9 @@ export async function GET() {
     const user = await getCurrentUser();
     if (!user) return fail("Connectez-vous pour accéder à votre bibliothèque.", 401);
     return success(user.id);
-  } catch { return fail("Impossible de charger votre bibliothèque.", 500); }
+  } catch {
+    return fail("Impossible de charger votre bibliothèque.", 500);
+  }
 }
 
 export async function POST(request: Request) {
@@ -51,35 +65,62 @@ export async function POST(request: Request) {
     const user = await getCurrentUser();
     if (!user) return fail("Connectez-vous pour enregistrer vos titres.", 401);
     const body: Input = await request.json();
+    const database = await getDb();
+
     if (body.kind === "collection") {
       const name = text(body.name, 80), description = text(body.description, 300);
       if (name.length < 2) return fail("Donnez un nom d'au moins 2 caractères à votre collection.");
-      const color = ["coral", "violet", "blue", "gold"].includes(text(body.color)) ? text(body.color) : "coral";
-      await db.insert(collections).values({ userId: user.id, name, description, color });
+      const requestedColor = text(body.color);
+      const color = ["coral", "violet", "blue", "gold"].includes(requestedColor) ? requestedColor : "coral";
+      const now = new Date();
+      const collection: CollectionDocument = {
+        _id: randomUUID(), userId: user.id, name, description, color, createdAt: now, updatedAt: now,
+      };
+      await database.collection<CollectionDocument>(mongoCollections.collections).insertOne(collection);
     } else if (body.kind === "item") {
       const collectionId = text(body.collectionId);
       const item = readItem(body.item);
-      if (!validId(collectionId) || !(await ownCollection(collectionId, user.id))) return fail("Collection introuvable.", 404);
+      if (!validId(collectionId) || !(await ownCollection(database, collectionId, user.id))) return fail("Collection introuvable.", 404);
       if (!item) return fail("Titre invalide.");
-      await db.insert(collectionItems).values({ collectionId, ...item }).onConflictDoNothing();
+      await database.collection<CollectionItemDocument>(mongoCollections.collectionItems).updateOne(
+        { collectionId, slug: item.slug, type: item.type },
+        { $setOnInsert: { _id: randomUUID(), collectionId, ...item, addedAt: new Date() } },
+        { upsert: true }
+      );
     } else if (body.kind === "progress") {
       const item = readItem(body.item);
       if (!item) return fail("Titre invalide.");
-      const values = { userId: user.id, ...item, episodeId: text(body.episodeId, 255), episodeTitle: text(body.episodeTitle, 255), percent: score(body.percent), updatedAt: new Date() };
-      await db.insert(watchProgress).values(values).onConflictDoUpdate({
-        target: [watchProgress.userId, watchProgress.slug, watchProgress.type],
-        set: { title: values.title, image: values.image, episodeId: values.episodeId, episodeTitle: values.episodeTitle, percent: values.percent, updatedAt: new Date() },
-      });
+      const values = {
+        title: item.title,
+        image: item.image,
+        episodeId: text(body.episodeId, 255),
+        episodeTitle: text(body.episodeTitle, 255),
+        percent: score(body.percent),
+        updatedAt: new Date(),
+      };
+      await database.collection<WatchProgressDocument>(mongoCollections.watchProgress).updateOne(
+        { userId: user.id, slug: item.slug, type: item.type },
+        { $set: values, $setOnInsert: { _id: randomUUID(), userId: user.id, slug: item.slug, type: item.type } },
+        { upsert: true }
+      );
     } else if (body.kind === "review") {
       const slug = text(body.slug), type = text(body.type), value = rating(body.rating);
       if (!slug || !validType(type) || value < 1 || value > 5) return fail("Choisissez une note entre 1 et 5.");
       const content = text(body.body, 1200);
-      await db.insert(reviews).values({ userId: user.id, slug, type, rating: value, body: content }).onConflictDoUpdate({
-        target: [reviews.userId, reviews.slug, reviews.type], set: { rating: value, body: content, updatedAt: new Date() },
-      });
-    } else return fail("Type de ressource inconnu.");
+      await database.collection<ReviewDocument>(mongoCollections.reviews).updateOne(
+        { userId: user.id, slug, type },
+        { $set: { rating: value, body: content, updatedAt: new Date() }, $setOnInsert: { _id: randomUUID(), userId: user.id, slug, type } },
+        { upsert: true }
+      );
+    } else {
+      return fail("Type de ressource inconnu.");
+    }
+
     return success(user.id);
-  } catch { return fail("Impossible d'enregistrer les modifications.", 500); }
+  } catch (error) {
+    if (isDuplicateKeyError(error)) return fail("Ce titre est déjà dans cette collection.", 409);
+    return fail("Impossible d'enregistrer les modifications.", 500);
+  }
 }
 
 export async function PATCH(request: Request) {
@@ -89,31 +130,45 @@ export async function PATCH(request: Request) {
     const body: Input = await request.json();
     const id = text(body.id);
     if (!validId(id)) return fail("Identifiant invalide.");
+    const database = await getDb();
+
     if (body.kind === "collection") {
-      if (!(await ownCollection(id, user.id))) return fail("Collection introuvable.", 404);
+      if (!(await ownCollection(database, id, user.id))) return fail("Collection introuvable.", 404);
       const name = text(body.name, 80);
       if (name.length < 2) return fail("Le nom doit contenir au moins 2 caractères.");
-      const color = ["coral", "violet", "blue", "gold"].includes(text(body.color)) ? text(body.color) : "coral";
-      await db.update(collections).set({ name, description: text(body.description, 300), color, updatedAt: new Date() }).where(eq(collections.id, id));
+      const requestedColor = text(body.color);
+      const color = ["coral", "violet", "blue", "gold"].includes(requestedColor) ? requestedColor : "coral";
+      await database.collection<CollectionDocument>(mongoCollections.collections).updateOne(
+        { _id: id, userId: user.id },
+        { $set: { name, description: text(body.description, 300), color, updatedAt: new Date() } }
+      );
     } else if (body.kind === "item") {
-      if (!(await ownItem(id, user.id))) return fail("Élément introuvable.", 404);
+      if (!(await ownItem(database, id, user.id))) return fail("Élément introuvable.", 404);
       const collectionId = text(body.collectionId);
-      if (!validId(collectionId) || !(await ownCollection(collectionId, user.id))) return fail("Collection cible introuvable.", 404);
-      await db.update(collectionItems).set({ collectionId }).where(eq(collectionItems.id, id));
+      if (!validId(collectionId) || !(await ownCollection(database, collectionId, user.id))) return fail("Collection cible introuvable.", 404);
+      await database.collection<CollectionItemDocument>(mongoCollections.collectionItems).updateOne(
+        { _id: id },
+        { $set: { collectionId } }
+      );
     } else if (body.kind === "progress") {
-      const [found] = await db.select({ id: watchProgress.id }).from(watchProgress).where(and(eq(watchProgress.id, id), eq(watchProgress.userId, user.id))).limit(1);
-      if (!found) return fail("Lecture introuvable.", 404);
-      await db.update(watchProgress).set({ percent: score(body.percent), updatedAt: new Date() }).where(eq(watchProgress.id, id));
+      const progress = database.collection<WatchProgressDocument>(mongoCollections.watchProgress);
+      const existing = await progress.findOne({ _id: id, userId: user.id }, { projection: { _id: 1 } });
+      if (!existing) return fail("Lecture introuvable.", 404);
+      await progress.updateOne({ _id: id, userId: user.id }, { $set: { percent: score(body.percent), updatedAt: new Date() } });
     } else if (body.kind === "review") {
-      const [found] = await db.select({ id: reviews.id }).from(reviews).where(and(eq(reviews.id, id), eq(reviews.userId, user.id))).limit(1);
-      if (!found) return fail("Avis introuvable.", 404);
+      const reviews = database.collection<ReviewDocument>(mongoCollections.reviews);
+      const existing = await reviews.findOne({ _id: id, userId: user.id }, { projection: { _id: 1 } });
+      if (!existing) return fail("Avis introuvable.", 404);
       const value = rating(body.rating);
       if (value < 1 || value > 5) return fail("Choisissez une note entre 1 et 5.");
-      await db.update(reviews).set({ rating: value, body: text(body.body, 1200), updatedAt: new Date() }).where(eq(reviews.id, id));
-    } else return fail("Type de ressource inconnu.");
+      await reviews.updateOne({ _id: id, userId: user.id }, { $set: { rating: value, body: text(body.body, 1200), updatedAt: new Date() } });
+    } else {
+      return fail("Type de ressource inconnu.");
+    }
+
     return success(user.id);
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "23505") return fail("Ce titre est déjà dans cette collection.", 409);
+    if (isDuplicateKeyError(error)) return fail("Ce titre est déjà dans cette collection.", 409);
     return fail("Impossible de modifier cette ressource.", 500);
   }
 }
@@ -125,19 +180,27 @@ export async function DELETE(request: Request) {
     const body: Input = await request.json();
     const id = text(body.id);
     if (!validId(id)) return fail("Identifiant invalide.");
+    const database = await getDb();
+
     if (body.kind === "collection") {
-      if (!(await ownCollection(id, user.id))) return fail("Collection introuvable.", 404);
-      await db.delete(collections).where(eq(collections.id, id));
+      if (!(await ownCollection(database, id, user.id))) return fail("Collection introuvable.", 404);
+      await database.collection<CollectionItemDocument>(mongoCollections.collectionItems).deleteMany({ collectionId: id });
+      await database.collection<CollectionDocument>(mongoCollections.collections).deleteOne({ _id: id, userId: user.id });
     } else if (body.kind === "item") {
-      if (!(await ownItem(id, user.id))) return fail("Élément introuvable.", 404);
-      await db.delete(collectionItems).where(eq(collectionItems.id, id));
+      if (!(await ownItem(database, id, user.id))) return fail("Élément introuvable.", 404);
+      await database.collection<CollectionItemDocument>(mongoCollections.collectionItems).deleteOne({ _id: id });
     } else if (body.kind === "progress") {
-      const removed = await db.delete(watchProgress).where(and(eq(watchProgress.id, id), eq(watchProgress.userId, user.id))).returning({ id: watchProgress.id });
-      if (!removed.length) return fail("Lecture introuvable.", 404);
+      const removed = await database.collection<WatchProgressDocument>(mongoCollections.watchProgress).deleteOne({ _id: id, userId: user.id });
+      if (!removed.deletedCount) return fail("Lecture introuvable.", 404);
     } else if (body.kind === "review") {
-      const removed = await db.delete(reviews).where(and(eq(reviews.id, id), eq(reviews.userId, user.id))).returning({ id: reviews.id });
-      if (!removed.length) return fail("Avis introuvable.", 404);
-    } else return fail("Type de ressource inconnu.");
+      const removed = await database.collection<ReviewDocument>(mongoCollections.reviews).deleteOne({ _id: id, userId: user.id });
+      if (!removed.deletedCount) return fail("Avis introuvable.", 404);
+    } else {
+      return fail("Type de ressource inconnu.");
+    }
+
     return success(user.id);
-  } catch { return fail("Impossible de supprimer cette ressource.", 500); }
+  } catch {
+    return fail("Impossible de supprimer cette ressource.", 500);
+  }
 }
